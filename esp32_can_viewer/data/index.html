@@ -1,0 +1,235 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>ESP32 CAN Viewer</title>
+    <style>
+        body { font-family: Arial, sans-serif; margin: 20px; background-color: #f4f4f9; }
+        h1, h2 { color: #333; }
+        .container { max-width: 900px; margin: auto; }
+        .panel { background: #fff; padding: 20px; border-radius: 8px; box-shadow: 0 2px 4px rgba(0,0,0,0.1); margin-bottom: 20px; }
+        table { width: 100%; border-collapse: collapse; margin-top: 10px; }
+        th, td { border: 1px solid #ddd; padding: 8px; text-align: left; }
+        th { background-color: #007bff; color: white; }
+        .form-group { margin-bottom: 15px; }
+        .form-group label { display: block; margin-bottom: 5px; font-weight: bold; }
+        .form-group input, .form-group select { width: 100%; padding: 8px; box-sizing: border-box; }
+        button { background-color: #28a745; color: white; border: none; padding: 10px 15px; cursor: pointer; border-radius: 4px; }
+        button:hover { background-color: #218838; }
+        button.delete-btn { background-color: #dc3545; padding: 5px 10px; }
+        button.delete-btn:hover { background-color: #c82333; }
+        #status { font-weight: bold; color: #dc3545; }
+        #status.connected { color: #28a745; }
+        .flex { display: flex; gap: 10px; }
+        .flex > div { flex: 1; }
+    </style>
+</head>
+<body>
+
+<div class="container">
+    <h1>ESP32 CAN Viewer <span id="status">Disconnected</span></h1>
+
+    <div class="panel">
+        <h2>Live Signals</h2>
+        <table id="signalsTable">
+            <thead>
+                <tr>
+                    <th>Signal Name</th>
+                    <th>CAN ID (Hex)</th>
+                    <th>Value</th>
+                    <th>Unit</th>
+                </tr>
+            </thead>
+            <tbody>
+                <!-- Rows injected by JS -->
+            </tbody>
+        </table>
+    </div>
+
+    <div class="panel">
+        <h2>Configure Signals</h2>
+        <div id="configList">
+            <table id="configTable">
+                <thead>
+                    <tr>
+                        <th>Name</th>
+                        <th>ID (Hex)</th>
+                        <th>Start Bit</th>
+                        <th>Length</th>
+                        <th>Endian</th>
+                        <th>Factor</th>
+                        <th>Offset</th>
+                        <th>Unit</th>
+                        <th>Action</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    <!-- Rows injected by JS -->
+                </tbody>
+            </table>
+        </div>
+
+        <h3 style="margin-top: 20px;">Add New Signal</h3>
+        <form id="addSignalForm">
+            <div class="flex">
+                <div class="form-group">
+                    <label>Signal Name</label>
+                    <input type="text" id="sigName" required>
+                </div>
+                <div class="form-group">
+                    <label>CAN ID (Hex)</label>
+                    <input type="text" id="sigId" placeholder="e.g. 1F9" required>
+                </div>
+                <div class="form-group">
+                    <label>Start Bit (0-63)</label>
+                    <input type="number" id="sigStart" min="0" max="63" required>
+                </div>
+                <div class="form-group">
+                    <label>Length (bits)</label>
+                    <input type="number" id="sigLen" min="1" max="64" required>
+                </div>
+            </div>
+            <div class="flex">
+                <div class="form-group">
+                    <label>Endianness</label>
+                    <select id="sigEndian">
+                        <option value="1">Little Endian (Intel)</option>
+                        <option value="0">Big Endian (Motorola)</option>
+                    </select>
+                </div>
+                <div class="form-group">
+                    <label>Factor</label>
+                    <input type="number" step="any" id="sigFactor" value="1" required>
+                </div>
+                <div class="form-group">
+                    <label>Offset</label>
+                    <input type="number" step="any" id="sigOffset" value="0" required>
+                </div>
+                <div class="form-group">
+                    <label>Unit</label>
+                    <input type="text" id="sigUnit" placeholder="e.g. RPM">
+                </div>
+            </div>
+            <button type="submit">Add Signal</button>
+        </form>
+    </div>
+</div>
+
+<script>
+    let ws;
+    let signalsConfig = [];
+    const statusEl = document.getElementById('status');
+    const signalsTableBody = document.querySelector('#signalsTable tbody');
+    const configTableBody = document.querySelector('#configTable tbody');
+
+    function connectWs() {
+        // ws = new WebSocket('ws://' + window.location.hostname + '/ws');
+        // Fallback for testing UI without ESP32
+        ws = new WebSocket('ws://' + (window.location.hostname || '192.168.4.1') + '/ws');
+
+        ws.onopen = () => {
+            statusEl.textContent = 'Connected';
+            statusEl.className = 'connected';
+            ws.send(JSON.stringify({cmd: "getConfig"}));
+        };
+
+        ws.onclose = () => {
+            statusEl.textContent = 'Disconnected';
+            statusEl.className = '';
+            setTimeout(connectWs, 2000);
+        };
+
+        ws.onmessage = (event) => {
+            const data = JSON.parse(event.data);
+            if (data.type === 'config') {
+                signalsConfig = data.signals || [];
+                renderConfigTable();
+                renderLiveTable();
+            } else if (data.type === 'data') {
+                updateLiveData(data.name, data.value);
+            }
+        };
+    }
+
+    function renderConfigTable() {
+        configTableBody.innerHTML = '';
+        signalsConfig.forEach((sig, index) => {
+            const row = document.createElement('tr');
+            row.innerHTML = `
+                <td>${sig.name}</td>
+                <td>0x${sig.id.toString(16).toUpperCase()}</td>
+                <td>${sig.startBit}</td>
+                <td>${sig.length}</td>
+                <td>${sig.isLittleEndian ? 'Little' : 'Big'}</td>
+                <td>${sig.factor}</td>
+                <td>${sig.offset}</td>
+                <td>${sig.unit || ''}</td>
+                <td><button class="delete-btn" onclick="deleteSignal(${index})">Del</button></td>
+            `;
+            configTableBody.appendChild(row);
+        });
+    }
+
+    function renderLiveTable() {
+        signalsTableBody.innerHTML = '';
+        signalsConfig.forEach(sig => {
+            const row = document.createElement('tr');
+            row.id = 'live-' + sig.name.replace(/\s+/g, '-');
+            row.innerHTML = `
+                <td>${sig.name}</td>
+                <td>0x${sig.id.toString(16).toUpperCase()}</td>
+                <td class="val">-</td>
+                <td>${sig.unit || ''}</td>
+            `;
+            signalsTableBody.appendChild(row);
+        });
+    }
+
+    function updateLiveData(name, value) {
+        const rowId = 'live-' + name.replace(/\s+/g, '-');
+        const row = document.getElementById(rowId);
+        if (row) {
+            // Format to 2 decimal places if it's a float
+            row.querySelector('.val').textContent = typeof value === 'number' && !Number.isInteger(value) ? value.toFixed(2) : value;
+        }
+    }
+
+    function deleteSignal(index) {
+        signalsConfig.splice(index, 1);
+        saveConfig();
+    }
+
+    document.getElementById('addSignalForm').addEventListener('submit', (e) => {
+        e.preventDefault();
+        const newSig = {
+            name: document.getElementById('sigName').value,
+            id: parseInt(document.getElementById('sigId').value, 16),
+            startBit: parseInt(document.getElementById('sigStart').value),
+            length: parseInt(document.getElementById('sigLen').value),
+            isLittleEndian: document.getElementById('sigEndian').value === "1",
+            factor: parseFloat(document.getElementById('sigFactor').value),
+            offset: parseFloat(document.getElementById('sigOffset').value),
+            unit: document.getElementById('sigUnit').value
+        };
+
+        signalsConfig.push(newSig);
+        saveConfig();
+        e.target.reset();
+    });
+
+    function saveConfig() {
+        if (ws && ws.readyState === WebSocket.OPEN) {
+            ws.send(JSON.stringify({
+                cmd: "setConfig",
+                signals: signalsConfig
+            }));
+        }
+        renderConfigTable();
+        renderLiveTable();
+    }
+
+    connectWs();
+</script>
+</body>
+</html>
